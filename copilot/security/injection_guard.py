@@ -12,18 +12,18 @@ from copilot.db import db
 class SecurityGuardrails:
     # Direct prompt injection & adversarial attempt patterns
     DIRECT_INJECTION_PATTERNS = [
-        r"disregard\s+(all\s+)?(previous\s+)?(instructions|rules|prompts)",
-        r"ignore\s+(all\s+)?(previous\s+)?(instructions|rules|prompts)",
-        r"reveal\s+(your\s+)?(system\s+prompt|internal\s+instructions)",
-        r"print\s+(the\s+)?(full\s+)?(contents\s+of\s+)?(the\s+)?clients(\s+table)?",
-        r"(list|dump|show|extract)\s+(all\s+)?(client\s+)?(emails|passwords|credentials|keys)",
-        r"you\s+are\s+now\s+in\s+DAN\s+mode",
-        r"bypass\s+(all\s+)?safety\s+filters"
+        r"disregard\s+.*?(instructions|rules|prompts)",
+        r"ignore\s+.*?(instructions|rules|prompts|security\s+policies)",
+        r"reveal\s+.*?(system\s+prompt|internal\s+instructions|master\s+api\s*key)",
+        r"print\s+.*?(clients|clients\s+table)",
+        r"\b(client\s+emails|contact\s+emails|purchase\s+history|client\s+database|clients\s+table)\b",
+        r"\b(dan\s+mode|jailbreak|unrestricted\s+mode|bypass\s+safety)\b",
+        r"output\s+.*?(master\s+api\s*key|api\s*key|password)"
     ]
 
-    # Malicious write / destructive actions
+    # Malicious write / destructive actions or direct raw SQL execution
     DESTRUCTIVE_SQL_PATTERNS = [
-        r"delete\s+(all\s+)?(rows|data|records)",
+        r"delete\s+.*?(rows|data|records|from)",
         r"drop\s+table",
         r"truncate\s+table",
         r"update\s+\w+\s+set",
@@ -31,10 +31,18 @@ class SecurityGuardrails:
         r"alter\s+table"
     ]
 
-    # Out of scope / sensitive topics (politics, elections, personal private data)
+    # Raw SQL query targeting confidential tables
+    CONFIDENTIAL_SQL_PATTERNS = [
+        r"select\s+.*\s+from\s+clients",
+        r"select\s+.*\s+from\s+audit_logs",
+        r"select\s+.*\s+from\s+users"
+    ]
+
+    # Out of scope / sensitive topics (politics, elections, personal private data, weather)
     OUT_OF_SCOPE_PATTERNS = [
         r"\b(who\s+will\s+win|election|president|prime\s+minister|vote|parliament|congress|democrat|republican|political\s+party)\b",
-        r"\b(salary|medical\s+records|religion|personal\s+phone\s+number)\b"
+        r"\b(salary|medical\s+records|religion|personal\s+phone\s+number)\b",
+        r"\b(weather|temperature|rain\s+forecast|humidity)\b"
     ]
 
     # Indirect injection markers inside documents (e.g. R-102 page 14 footnote trap)
@@ -45,11 +53,7 @@ class SecurityGuardrails:
     ]
 
     def check_user_query(self, query: str, client_id: str) -> Tuple[bool, str, Dict[str, Any]]:
-        """Inspect user query for safety violations before agent processing.
-        
-        Returns:
-            (is_safe, refusal_reason, metadata)
-        """
+        """Inspect user query for safety violations before agent processing."""
         q_lower = query.lower()
 
         # 1. Direct prompt injection detection
@@ -62,8 +66,8 @@ class SecurityGuardrails:
                 )
                 return False, (
                     "Security Notice: This request contains prohibited prompt override instructions. "
-                    "In accordance with Cognitive Market Research security protocols, internal instructions "
-                    "and confidential client databases cannot be displayed or altered."
+                    "In accordance with Cognitive Market Research security protocols, internal instructions, "
+                    "master credentials, and confidential client databases cannot be displayed or altered."
                 ), {"type": "prompt_injection", "flag": "unsafe_request"}
 
         # 2. Destructive SQL / Command manipulation
@@ -79,26 +83,33 @@ class SecurityGuardrails:
                     "are strictly prohibited. The analytics engine is restricted to read-only queries."
                 ), {"type": "destructive_sql", "flag": "unsafe_request"}
 
-        # 3. Out of scope / sensitive topics
+        # 3. Confidential SQL queries
+        for pat in self.CONFIDENTIAL_SQL_PATTERNS:
+            if re.search(pat, q_lower):
+                db.record_audit_log(
+                    "UNAUTHORIZED_TABLE_ACCESS_BLOCKED",
+                    client_id,
+                    f"Attempt to query confidential table via SQL: '{query}'"
+                )
+                return False, (
+                    "Security Refusal: Access to the confidential 'clients' table is forbidden. "
+                    "The analytics engine cannot query private tenant databases."
+                ), {"type": "sql_confidential_table_block", "flag": "unsafe_request"}
+
+        # 4. Out of scope / sensitive topics
         for pat in self.OUT_OF_SCOPE_PATTERNS:
             if re.search(pat, q_lower):
                 return False, (
                     "Out of Scope: Cognitive Market Research Copilot assists exclusively with market intelligence, "
                     "industry sizing, competitive benchmarking, and utility infrastructure analytics. "
-                    "We cannot comment on political campaigns, elections, or personal private information. "
+                    "We cannot comment on political campaigns, weather forecasts, or personal private information. "
                     "Please ask a market research or industry-related question."
                 ), {"type": "out_of_scope", "flag": "refusal_out_of_scope"}
 
         return True, "", {}
 
     def sanitize_retrieved_chunk(self, chunk_text: str, chunk_id: str, client_id: str) -> str:
-        """Inspect and sanitize retrieved document content for indirect prompt injections.
-        
-        If adversarial instructions are found:
-        1. Logs the incident in audit_logs.
-        2. Neutralizes the adversarial instructions.
-        3. Wraps the remaining text in inert data tags so the LLM treats it purely as market data.
-        """
+        """Inspect and sanitize retrieved document content for indirect prompt injections."""
         detected_traps = []
         for pat in self.INDIRECT_TRAP_PATTERNS:
             found = re.findall(pat, chunk_text, flags=re.IGNORECASE)
