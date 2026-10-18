@@ -37,6 +37,7 @@ htmlcov/
 *.sqlite3
 data/copilot.db
 data/vector_store/
+data/vector_store.json
 vector_index.json
 
 # IDE & OS
