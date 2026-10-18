@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: atlas-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secure_pass_2025
+      MYSQL_DATABASE: copilot_db
+      MYSQL_USER: copilot_rw
+      MYSQL_PASSWORD: copilot_secure_pass_2025
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_secure_pass_2025"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - atlas-net
+
+  copilot-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: atlas-copilot-api
+    restart: always
+    environment:
+      DB_TYPE: mysql
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: copilot_db
+      MYSQL_USER: copilot_rw
+      MYSQL_PASSWORD: copilot_secure_pass_2025
+      MYSQL_RO_USER: analyst_ro
+      MYSQL_RO_PASSWORD: analyst_ro_pass_2025
+      COPILOT_API_KEY: atlas_secret_api_key_2025
+      PORT: 8000
+      HOST: 0.0.0.0
+      ENVIRONMENT: production
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - atlas-net
+
+  frontend-ci3:
+    build:
+      context: .
+      dockerfile: Dockerfile.php
+    container_name: atlas-frontend-ci3
+    restart: always
+    environment:
+      COPILOT_API_URL: http://copilot-api:8000
+      COPILOT_API_KEY: atlas_secret_api_key_2025
+      MYSQL_HOST: mysql
+      MYSQL_USER: copilot_rw
+      MYSQL_PASSWORD: copilot_secure_pass_2025
+      MYSQL_DATABASE: copilot_db
+      CI_BASE_URL: http://localhost:8080/
+    ports:
+      - "8080:80"
+    depends_on:
+      - copilot-api
+    networks:
+      - atlas-net
+
+networks:
+  atlas-net:
+    driver: bridge
+
+volumes:
+  mysql_data:
